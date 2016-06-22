@@ -11,6 +11,7 @@ Thang = require 'lib/world/thang'
 LevelThangEditView = require './LevelThangEditView'
 ComponentsCollection = require 'collections/ComponentsCollection'
 require 'vendor/treema'
+GameUIState = require 'models/GameUIState'
 
 # Moving the screen while dragging thangs constants
 MOVE_MARGIN = 0.15
@@ -39,7 +40,6 @@ module.exports = class ThangsTabView extends CocoView
     'editor:view-switched': 'onViewSwitched'
     'sprite:dragged': 'onSpriteDragged'
     'sprite:mouse-up': 'onSpriteMouseUp'
-    'sprite:mouse-down': 'onSpriteMouseDown'
     'sprite:double-clicked': 'onSpriteDoubleClicked'
     'surface:stage-mouse-down': 'onStageMouseDown'
     'surface:stage-mouse-up': 'onStageMouseUp'
@@ -78,6 +78,12 @@ module.exports = class ThangsTabView extends CocoView
   constructor: (options) ->
     super options
     @world = options.world
+    @gameUIState = new GameUIState()
+    @listenTo(@gameUIState, 'all', ->
+      console.debug 'gameUIState event:  ', arguments...
+    )
+    @listenTo(@gameUIState, 'sprite:mouse-down', @onSpriteMouseDown)
+    @listenTo(@gameUIState, 'change:selected', @onChangeSelected)
 
     # should load depended-on Components, too
     @thangTypes = @supermodel.loadCollection(new ThangTypeSearchCollection(), 'thangs').model
@@ -203,7 +209,7 @@ module.exports = class ThangsTabView extends CocoView
   initSurface: ->
     webGLCanvas = $('canvas#webgl-surface', @$el)
     normalCanvas = $('canvas#normal-surface', @$el)
-    @surface = new Surface @world, normalCanvas, webGLCanvas, {
+    @surface = new Surface(@world, normalCanvas, webGLCanvas, {
       paths: false
       coords: true
       grid: true
@@ -212,7 +218,9 @@ module.exports = class ThangsTabView extends CocoView
       showInvisible: true
       frameRate: 15
       levelType: @level.get 'type', true
-    }
+      @gameUIState
+      handleEvents: false
+    })
     @surface.playing = false
     @surface.setWorld @world
     @surface.lankBoss.suppressSelectionSounds = true
@@ -241,37 +249,45 @@ module.exports = class ThangsTabView extends CocoView
     @surface?.lankBoss?.selectLank null, null
 
   onSpriteMouseDown: (e) ->
-    @dragged = false
-    # Sprite clicks happen after stage clicks, but we need to know whether a sprite is being clicked.
-    # clearTimeout @backgroundAddClickTimeout
-    # if e.originalEvent.nativeEvent.button == 2
-    #   @onSpriteContextMenu e
+    # update selection
+    # TODO: Handle key.shift, lankBoss.dragged property
+    selected = if e.thang?.isSelectable then { thang: e.thang, sprite: e.sprite, spellName: e.spellName } else null
+    @gameUIState.set('selected', selected)
+    if not selected
+      @gameUIState.set('canDragCamera', true)
+      # TODO: Start here
 
   onStageMouseDown: (e) ->
-    return unless @addThangLank?.thangType.get('kind') is 'Wall'
-    @surface.camera.dragDisabled = true
-    @paintingWalls = true
+    @dragged = false
+    if @addThangLank?.thangType.get('kind') is 'Wall'
+      @paintingWalls = true
+    else if @addThangLank
+      # We clicked on the background when we had an add Thang selected, so add it
+      @addThang @addThangType, @addThangLank.thang.pos
+      @lastAddTime = new Date()
+    else if e.onBackground
+      @gameUIState.set('selected', null)
+      @gameUIState.set('canDragCamera', true)
 
   onStageMouseUp: (e) ->
     if @paintingWalls
-      # We need to stop painting walls, but we may also stop in onExtantThangSelected.
-      _.defer =>
-        @paintingWalls = @paintedWalls = @surface.camera.dragDisabled = false
+      @paintingWalls = @paintedWalls = false
     else if @addThangLank
       @surface.camera.lock()
       # If we click on the background, we need to add @addThangLank, but not if onSpriteMouseUp will fire.
-      @backgroundAddClickTimeout = _.defer => @onExtantThangSelected {}
     $('#contextmenu').hide()
+    @gameUIState.set('canDragCamera', false)
 
   onSpriteDragged: (e) ->
-    return unless @selectedExtantThang and e.thang?.id is @selectedExtantThang?.id
+    selected = @gameUIState.get('selected')
+    return unless selected and e.thang?.id is selected.thang.id
     @dragged = true
     @surface.camera.dragDisabled = true
     {stageX, stageY} = e.originalEvent
     cap = @surface.camera.screenToCanvas x: stageX, y: stageY
     wop = @surface.camera.canvasToWorld cap
-    wop.z = @selectedExtantThang.depth / 2
-    @adjustThangPos @selectedExtantLank, @selectedExtantThang, wop
+    wop.z = selected.thang.depth / 2
+    @adjustThangPos selected.lank, selected.thang, wop
     [w, h] = [@surface.camera.canvasWidth, @surface.camera.canvasHeight]
     sidebarWidths = ((if @$el.find(id).hasClass('hide') then 0 else (@$el.find(id).outerWidth() / @surface.camera.canvasScaleFactorX)) for id in ['#all-thangs', '#add-thangs-view'])
     w -= sidebarWidth for sidebarWidth in sidebarWidths
@@ -279,17 +295,24 @@ module.exports = class ThangsTabView extends CocoView
     @calculateMovement(cap.x / w, cap.y / h, w / h)
 
   onSpriteMouseUp: (e) ->
+    selected =@gameUIState.get('selected')
     clearTimeout @backgroundAddClickTimeout
     @surface.camera.unlock()
-    if e.originalEvent.nativeEvent.button == 2 and @selectedExtantThang
+    if e.originalEvent.nativeEvent.button == 2 and selected
       @onSpriteContextMenu e
     clearInterval(@movementInterval) if @movementInterval?
     @movementInterval = null
     @surface.camera.dragDisabled = false
-    return unless @selectedExtantThang and e.thang?.id is @selectedExtantThang?.id
-    pos = @selectedExtantThang.pos
+    
+    if not selected and not @dragged
+      console.log 'move camera to', e
+#      worldPos ?= @camera.screenToWorld {x: e.originalEvent.rawX, y: e.originalEvent.rawY} if e?.originalEvent
+#      @surface.camera.zoomTo(@surface.camera.worldToSurface(worldPos), @camera.zoom, 1000, true)
 
-    thang = _.find(@level.get('thangs') ? [], {id: @selectedExtantThang.id})
+    return unless selected and e.thang?.id is selected.thang.id
+    pos = selected.thang.pos
+
+    thang = _.find(@level.get('thangs') ? [], {id: selected.thang.id})
     path = "#{@pathForThang(thang)}/components/original=#{LevelComponent.PhysicalID}"
     physical = @thangsTreema.get path
     return if not physical or (physical.config.pos.x is pos.x and physical.config.pos.y is pos.y)
@@ -320,35 +343,29 @@ module.exports = class ThangsTabView extends CocoView
     @onThangsChanged()
     @selectAddThangType null
 
+  onChangeSelected: (gameUIState, selected) ->
+    console.log 'changed...'
+    previousSprite = gameUIState.previousAttributes()?.selected?.sprite
+    sprite = selected?.sprite
+    thang = selected?.thang
 
-  # TODO: figure out a good way to have all Surface clicks and Treema clicks just proxy in one direction, so we can maintain only one way of handling selection and deletion
-  onExtantThangSelected: (e) ->
-    @selectedExtantLank?.setNameLabel? null unless @selectedExtantLank is e.sprite
-    @selectedExtantThang = e.thang
-    @selectedExtantLank = e.sprite
-    paintedAWall = @paintedWalls
-    @paintingWalls = @paintedWalls = @surface.camera.dragDisabled = false
-    if paintedAWall
-      # Skip adding a wall now, because we already dragged to add one
-      null
-    else if e.thang and (key.alt or key.meta)
+    previousSprite?.setNameLabel?(null) unless previousSprite is sprite
+    
+    if thang and (key.alt or key.meta)
+      console.log 'Create a clone' # TODO: Move to mouse click
       # We alt-clicked, so create a clone addThang
-      @selectAddThangType e.thang.spriteName, @selectedExtantThang
-    else if @justAdded()
-      # Skip double insert due to extra selection event
-      null
-    else if e.thang and not (@addThangLank and @addThangType.get('name') in overlappableThangTypeNames)
+      @selectAddThangType thang.spriteName, thang
+    else if thang and not (@addThangLank and @addThangType.get('name') in overlappableThangTypeNames)
+      console.log 'Select a thang'
       # We clicked on a Thang (or its Treema), so select the Thang
-      @selectAddThang null, true
+      @selectAddThang(null, true)
       @selectedExtantThangClickTime = new Date()
       # Show the label above selected thang, notice that we may get here from thang-edit-view, so it will be selected but no label
-      @selectedExtantLank.setNameLabel @selectedExtantLank.thangType.get('name') + ': ' + @selectedExtantThang.id
-      @selectedExtantLank.updateLabels()
-      @selectedExtantLank.updateMarks()
-    else if @addThangLank
-      # We clicked on the background when we had an add Thang selected, so add it
-      @addThang @addThangType, @addThangLank.thang.pos
-      @lastAddTime = new Date()
+      sprite.setNameLabel(sprite.thangType.get('name') + ': ' + thang.id)
+      sprite.updateLabels()
+      sprite.updateMarks()
+
+  onExtantThangSelected: (e) ->
 
   justAdded: -> @lastAddTime and (new Date() - @lastAddTime) < 150
 
@@ -430,6 +447,7 @@ module.exports = class ThangsTabView extends CocoView
     @surface.lankBoss.update true  # Make sure Obstacle layer resets cache
 
   onSurfaceMouseMoved: (e) ->
+    @dragged = true
     return unless @addThangLank
     wop = @surface.camera.screenToWorld x: e.x, y: e.y
     wop.z = 0.5
@@ -482,8 +500,9 @@ module.exports = class ThangsTabView extends CocoView
 
   deleteSelectedExtantThang: (e) =>
     return if $(e.target).hasClass 'treema-node'
-    return unless @selectedExtantThang
-    thang = @getThangByID(@selectedExtantThang.id)
+    selected = @gameUIState.get('selected')
+    return unless selected
+    thang = @getThangByID(selected.thang.id)
     @thangsTreema.delete(@pathForThang(thang))
     @deleteEmptyTreema(thang)
     Thang.resetThangIDs()  # TODO: find some way to do this when we delete from treema, too
@@ -564,14 +583,19 @@ module.exports = class ThangsTabView extends CocoView
     @selectAddThangType @addThangType, @cloneSourceThang if @addThangType  # make another addThang sprite, since the World just refreshed
 
     # update selection, since the thangs have been remade
-    if @selectedExtantThang
-      @selectedExtantLank = @surface.lankBoss.lanks[@selectedExtantThang.id]
-      @selectedExtantThang = @selectedExtantLank?.thang
+    selected = @gameUIState.get('selected')
+    if selected
+      sprite = @surface.lankBoss.lanks[selected.thang.id]
+      if sprite
+        thang = sprite.thang
+        @gameUIState.set('selected', _.extend({}, selected, { sprite, thang }))
+      else
+        @gameUIState.set('selected', null)
     Backbone.Mediator.publish 'editor:thangs-edited', thangs: @world.thangs
 
   onTreemaThangSelected: (e, selectedTreemas) =>
     selectedThangID = _.last(selectedTreemas)?.data.id
-    if selectedThangID isnt @selectedExtantThang?.id
+    if selectedThangID isnt @gameUIState.get('selected')?.thang.id
       @surface.lankBoss.selectThang selectedThangID, null, true
 
   onTreemaThangDoubleClicked: (e, treema) =>
@@ -655,7 +679,8 @@ module.exports = class ThangsTabView extends CocoView
 
   onDuplicateClicked: (e) ->
     $('#contextmenu').hide()
-    @selectAddThangType @selectedExtantThang.spriteName, @selectedExtantThang
+    selected = @gameUIState.get('selected')
+    @selectAddThangType(selected.thang.spriteName, selected.thang)
 
   onClickRotationButton: (e) ->
     $('#contextmenu').hide()
@@ -667,7 +692,8 @@ module.exports = class ThangsTabView extends CocoView
     @hush = true
     thangData = @getThangByID thang.id
     thangData = $.extend true, {}, thangData
-    unless component = _.find thangData.components, {original: componentOriginal}
+    component = _.find thangData.components, {original: componentOriginal}
+    unless component
       component = original: componentOriginal, config: {}, majorVersion: 0
       thangData.components.push component
     modificationFunction component
@@ -682,34 +708,39 @@ module.exports = class ThangsTabView extends CocoView
     lank.setDebug true
 
   rotateSelectedThangTo: (radians) ->
-    @modifySelectedThangComponentConfig @selectedExtantThang, LevelComponent.PhysicalID, (component) =>
+    selectedThang = @gameUIState.get('selected')?.thang
+    @modifySelectedThangComponentConfig selectedThang, LevelComponent.PhysicalID, (component) =>
       component.config.rotation = radians
-      @selectedExtantThang.rotation = component.config.rotation
+      selectedThang.rotation = component.config.rotation
 
   rotateSelectedThangBy: (radians) ->
-    @modifySelectedThangComponentConfig @selectedExtantThang, LevelComponent.PhysicalID, (component) =>
+    selectedThang = @gameUIState.get('selected')?.thang
+    @modifySelectedThangComponentConfig selectedThang, LevelComponent.PhysicalID, (component) =>
       component.config.rotation = ((component.config.rotation ? 0) + radians) % (2 * Math.PI)
-      @selectedExtantThang.rotation = component.config.rotation
+      selectedThang.rotation = component.config.rotation
 
   moveSelectedThangBy: (xDir, yDir) ->
-    @modifySelectedThangComponentConfig @selectedExtantThang, LevelComponent.PhysicalID, (component) =>
+    selectedThang = @gameUIState.get('selected')?.thang
+    @modifySelectedThangComponentConfig selectedThang, LevelComponent.PhysicalID, (component) =>
       component.config.pos.x += 0.5 * xDir
       component.config.pos.y += 0.5 * yDir
-      @selectedExtantThang.pos.x = component.config.pos.x
-      @selectedExtantThang.pos.y = component.config.pos.y
+      selectedThang.pos.x = component.config.pos.x
+      selectedThang.pos.y = component.config.pos.y
 
   resizeSelectedThangBy: (xDir, yDir) ->
-    @modifySelectedThangComponentConfig @selectedExtantThang, LevelComponent.PhysicalID, (component) =>
+    selectedThang = @gameUIState.get('selected')?.thang
+    @modifySelectedThangComponentConfig selectedThang, LevelComponent.PhysicalID, (component) =>
       component.config.width = (component.config.width ? 4) + 0.5 * xDir
       component.config.height = (component.config.height ? 4) + 0.5 * yDir
-      @selectedExtantThang.width = component.config.width
-      @selectedExtantThang.height = component.config.height
+      selectedThang.width = component.config.width
+      selectedThang.height = component.config.height
 
   toggleSelectedThangCollision: ->
-    @modifySelectedThangComponentConfig @selectedExtantThang, LevelComponent.CollidesID, (component) =>
+    selectedThang = @gameUIState.get('selected')?.thang
+    @modifySelectedThangComponentConfig selectedThang, LevelComponent.CollidesID, (component) =>
       component.config ?= {}
       component.config.collisionCategory = if component.config.collisionCategory is 'none' then 'ground' else 'none'
-      @selectedExtantThang.collisionCategory = component.config.collisionCategory
+      selectedThang.collisionCategory = component.config.collisionCategory
 
   toggleThangsContainer: (e) ->
     $('#all-thangs').toggleClass('hide')

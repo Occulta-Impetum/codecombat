@@ -57,12 +57,13 @@ module.exports = Lank = class Lank extends CocoClass
     'level:set-letterbox': 'onSetLetterbox'
     'surface:ticked': 'onSurfaceTicked'
     'sprite:move': 'onMove'
-
-  constructor: (@thangType, options) ->
+    
+  constructor: (@thangType, @options={}) ->
     super()
+    @gameUIState = @options.gameUIState
+    @handleEvents = @options.handleEvents
     spriteName = @thangType.get('name')
     @isMissile = /(Missile|Arrow|Spear|Bolt)/.test(spriteName) and not /(Tower|Charge)/.test(spriteName)
-    @options = _.extend($.extend(true, {}, @options), options)
     @setThang @options.thang
     if @thang?
       options = @thang?.getLankOptions?()
@@ -496,6 +497,7 @@ module.exports = Lank = class Lank extends CocoClass
     newEvent = sprite: @, thang: @thang, originalEvent: e, canvas: p.canvas
     @trigger ourEventName, newEvent
     Backbone.Mediator.publish ourEventName, newEvent
+    @gameUIState.trigger(ourEventName, newEvent)
 
   addHealthBar: ->
     return unless @thang?.health? and 'health' in (@thang?.hudProperties ? []) and @options.floatingLayer
